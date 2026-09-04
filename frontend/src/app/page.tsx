@@ -29,29 +29,29 @@ export default function Home() {
         router.push('/login');
     };
 
-    if (loading) return <div className="h-[100dvh] bg-[#212121] text-white flex items-center justify-center">Loading...</div>;
+    if (loading) return <div className="flex h-[100dvh] items-center justify-center bg-canvas text-ink-2">Loading…</div>;
 
     return (
-        <main className="h-[100dvh] w-full bg-[#212121] flex flex-col relative overflow-hidden">
+        <main className="relative flex h-[100dvh] w-full flex-col overflow-hidden bg-canvas">
             {/* Top Right Controls */}
-            <div className="absolute top-4 right-4 z-50 flex items-center gap-3">
+            <div className="absolute top-3 right-3 z-50 flex items-center gap-2">
                 {role === 'admin' && (
                     <button
                         onClick={() => router.push('/campus_admin')}
-                        className="bg-white/10 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-white/20 transition-all border border-white/10"
+                        className="rounded-control border border-line bg-surface px-3 py-1.5 text-[12.5px] font-medium text-ink-2 shadow-btn transition-colors hover:bg-hover hover:text-ink"
                     >
-                        Admin Dashboard
+                        Admin dashboard
                     </button>
                 )}
                 <button
                     onClick={handleLogout}
-                    className="bg-red-500/10 text-red-500 border border-red-500/20 px-4 py-2 rounded-lg text-sm font-medium hover:bg-red-500 hover:text-white transition-all"
+                    className="rounded-control border border-line bg-surface px-3 py-1.5 text-[12.5px] font-medium text-ink-3 shadow-btn transition-colors hover:bg-hover hover:text-red"
                 >
-                    Logout
+                    Log out
                 </button>
             </div>
 
-            <div className="flex-1 w-full h-full">
+            <div className="h-full w-full flex-1">
                 <ChatInterface />
             </div>
         </main>

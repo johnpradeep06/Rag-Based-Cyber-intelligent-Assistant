@@ -1,3 +1,5 @@
+import { API_ENDPOINTS } from "./api";
+
 export async function askRag(question: string) {
   const token = localStorage.getItem('token');
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -7,7 +9,7 @@ export async function askRag(question: string) {
   }
 
   const res = await fetch(
-    `https://campus-llm-production.up.railway.app/ask`,
+    API_ENDPOINTS.ask,
     {
       method: "POST",
       headers: headers,

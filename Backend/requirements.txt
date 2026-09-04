@@ -15,3 +15,7 @@ bcrypt<4.1.0
 google-genai
 google-api-python-client
 exa-py
+docx2txt
+openpyxl
+GitPython
+feedparser

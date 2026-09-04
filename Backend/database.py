@@ -1,8 +1,13 @@
+import os
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from datetime import datetime
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///./users.db"
+# DATA_DIR points at a persistent volume in production (e.g. Railway) so the
+# SQLite file survives redeploys; defaults to the working directory locally.
+DATA_DIR = os.getenv("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+SQLALCHEMY_DATABASE_URL = f"sqlite:///{DATA_DIR}/users.db"
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}

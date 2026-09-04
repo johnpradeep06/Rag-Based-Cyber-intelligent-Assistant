@@ -187,7 +187,7 @@ def read_users_me(current_user: User = Depends(get_current_user)):
 # File Upload (Admin Only)
 # -------------------------
 
-UPLOAD_DIR = "uploaded_files"
+UPLOAD_DIR = os.path.join(os.getenv("DATA_DIR", "."), "uploaded_files")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @app.post("/upload")

@@ -20,6 +20,13 @@ export const metadata: Metadata = {
   title: "Sentinel — Cyber Security Intelligence",
   description:
     "A RAG-based cyber security intelligence assistant. Ask about attacks, techniques and defenses, grounded in your indexed sources.",
+  icons: {
+    icon: [
+      { url: "/icon.svg", type: "image/svg+xml" },
+      { url: "/favicon.ico", sizes: "any" },
+    ],
+    apple: "/apple-icon.png",
+  },
 };
 
 export default function RootLayout({

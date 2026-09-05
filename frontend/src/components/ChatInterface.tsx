@@ -80,7 +80,7 @@ export default function ChatInterface() {
     const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
-    const stickToBottomRef = useRef(true); // false once the user scrolls up to read
+    const prevMessageCountRef = useRef(0); // only jump on new messages, never mid-stream
     const [showJumpButton, setShowJumpButton] = useState(false);
     const abortRef = useRef<AbortController | null>(null);
     const taRef = useRef<HTMLTextAreaElement>(null);
@@ -132,26 +132,29 @@ export default function ChatInterface() {
         return () => window.removeEventListener("keydown", onKey);
     }, []);
 
-    // Only follow the stream while the user is already at the bottom — never yank
-    // them back down if they've scrolled up to read an earlier part of the answer.
-    const scrollToBottom = (behavior: ScrollBehavior = "auto") =>
-        messagesEndRef.current?.scrollIntoView({ behavior, block: "end" });
+    // Never auto-follow while text streams in — the user reads from the top and
+    // scrolls themself. We only jump once when a new message is appended.
+    const scrollToBottom = (behavior: ScrollBehavior = "auto") => {
+        const el = scrollRef.current;
+        if (!el) return;
+        el.scrollTo({ top: el.scrollHeight, behavior });
+    };
 
     const onMessagesScroll = () => {
         const el = scrollRef.current;
         if (!el) return;
         const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-        const atBottom = distanceFromBottom < 96;
-        stickToBottomRef.current = atBottom;
-        setShowJumpButton(!atBottom);
+        setShowJumpButton(distanceFromBottom >= 96);
     };
 
     useEffect(() => {
-        if (stickToBottomRef.current) scrollToBottom();
-    }, [messages]);
+        if (messages.length > prevMessageCountRef.current) {
+            requestAnimationFrame(() => scrollToBottom());
+        }
+        prevMessageCountRef.current = messages.length;
+    }, [messages.length]);
 
     const jumpToBottom = () => {
-        stickToBottomRef.current = true;
         setShowJumpButton(false);
         scrollToBottom("smooth");
     };
@@ -233,7 +236,6 @@ export default function ChatInterface() {
             : textToSubmit.trim();
         setInput("");
         setQuote(null);
-        stickToBottomRef.current = true; // follow your own new message + the reply that follows it
         setShowJumpButton(false);
         setMessages((prev) => [
             ...prev,
@@ -440,6 +442,7 @@ export default function ChatInterface() {
                     <div
                         ref={scrollRef}
                         onScroll={onMessagesScroll}
+                        style={{ overflowAnchor: "none" }}
                         className="custom-scrollbar flex h-full w-full flex-col items-center overflow-y-auto"
                     >
                         <div

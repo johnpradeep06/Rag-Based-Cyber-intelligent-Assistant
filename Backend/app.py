@@ -11,7 +11,7 @@ from pydantic import BaseModel, field_validator
 
 from database import (
     engine, Base, get_db, SessionLocal, User, ChatSession, ChatMessage,
-    KnowledgeSource, ensure_columns,
+    KnowledgeSource, ensure_columns, get_setting, set_setting,
 )
 from datetime import datetime
 from auth import (
@@ -397,6 +397,36 @@ def remove_source(
     return {"deleted": True, "chunks_removed": removed}
 
 # -------------------------
+# Admin settings (runtime toggles)
+# -------------------------
+
+class SettingsResponse(BaseModel):
+    guardrails_enabled: bool
+
+
+class SettingsUpdate(BaseModel):
+    guardrails_enabled: bool
+
+
+@app.get("/admin/settings", response_model=SettingsResponse)
+def read_settings(
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    return SettingsResponse(guardrails_enabled=_guardrails_on(db))
+
+
+@app.patch("/admin/settings", response_model=SettingsResponse)
+def update_settings(
+    body: SettingsUpdate,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    set_setting(db, GUARDRAILS_SETTING_KEY, "true" if body.guardrails_enabled else "false")
+    return SettingsResponse(guardrails_enabled=body.guardrails_enabled)
+
+
+# -------------------------
 # RAG Endpoint
 # -------------------------
 
@@ -435,6 +465,17 @@ def get_session_messages(session_id: int, current_user: User = Depends(get_curre
         raise HTTPException(status_code=404, detail="Session not found")
     return session.messages
 
+GUARDRAILS_SETTING_KEY = "guardrails_enabled"
+
+
+def _guardrails_on(db: Session) -> bool:
+    """Runtime state of the admin guardrails toggle; defaults ON, never raises."""
+    try:
+        return get_setting(db, GUARDRAILS_SETTING_KEY, "true") == "true"
+    except Exception:
+        return True
+
+
 def _load_history(db: Session, session_id: int, limit: int = MEMORY_WINDOW):
     """Recent turns for a session, oldest-first, as [{role, content}].
     Call BEFORE saving the current user message so it isn't included."""
@@ -464,7 +505,8 @@ def ask_rag_session(
         session.title = query.question[:30] + ("..." if len(query.question) > 30 else "")
         db.commit()
 
-    guard = guardrails.check_input(query.question)
+    g_on = _guardrails_on(db)
+    guard = guardrails.check_input(query.question, enabled=g_on)
     history = _load_history(db, session.id) if guard["allowed"] else []
 
     # Save user message
@@ -480,7 +522,7 @@ def ask_rag_session(
             answer = rag_answer(query.question, history=history)
         except Exception as e:
             answer = f"Error generating response: {str(e)}"
-        answer = guardrails.check_output(answer)["text"]
+        answer = guardrails.check_output(answer, enabled=g_on)["text"]
 
     # Save assistant message
     asst_msg = ChatMessage(session_id=session.id, role="assistant", content=answer)
@@ -509,7 +551,8 @@ def ask_rag_session_stream(
         session.title = query.question[:30] + ("..." if len(query.question) > 30 else "")
         db.commit()
 
-    guard = guardrails.check_input(query.question)
+    g_on = _guardrails_on(db)
+    guard = guardrails.check_input(query.question, enabled=g_on)
     history = _load_history(db, session.id) if guard["allowed"] else []
 
     db.add(ChatMessage(session_id=session.id, role="user", content=query.question))
@@ -558,7 +601,7 @@ def ask_rag_session_stream(
         finally:
             # Persist on a fresh session: the request-scoped db is torn down
             # once the endpoint returns, before this generator finishes draining.
-            checked = guardrails.check_output("".join(answer_parts))
+            checked = guardrails.check_output("".join(answer_parts), enabled=g_on)
             content = checked["text"]
             if checked["flags"]:
                 print(f"[guardrails] output flags {checked['flags']} on session {sid}")

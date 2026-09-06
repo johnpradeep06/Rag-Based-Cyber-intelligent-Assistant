@@ -63,6 +63,28 @@ class KnowledgeSource(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class Setting(Base):
+    """Tiny key/value store for runtime-flippable config (e.g. guardrails on/off)."""
+    __tablename__ = "settings"
+
+    key = Column(String, primary_key=True, index=True)
+    value = Column(String)
+
+
+def get_setting(db, key: str, default: str | None = None) -> str | None:
+    row = db.query(Setting).filter(Setting.key == key).first()
+    return row.value if row else default
+
+
+def set_setting(db, key: str, value: str) -> None:
+    row = db.query(Setting).filter(Setting.key == key).first()
+    if row:
+        row.value = value
+    else:
+        db.add(Setting(key=key, value=value))
+    db.commit()
+
+
 def ensure_columns():
     """Idempotent add of columns introduced after the table already existed.
     ponytail: raw ALTER over Alembic — one dev SQLite file, two nullable columns."""

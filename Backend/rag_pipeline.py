@@ -238,6 +238,53 @@ def is_greeting(text: str) -> bool:
     text = text.lower().strip()
     return any(text == g or text.startswith(g) for g in greetings)
 
+
+# =========================================================
+# SMALL-TALK / IDENTITY PRE-ROUTER
+# =========================================================
+# Greetings and "what are you / what can you do" questions must NOT go through
+# retrieval — otherwise the model answers them from whatever security docs came
+# back. Caught here and answered with a fixed reply (also skips a round trip).
+
+_GREETING_REPLY = (
+    "Hi — I'm **Sentinel**, a cyber-security intelligence assistant. Ask me about "
+    "threats, vulnerabilities, detection rules, or anything in the indexed security "
+    "sources and I'll answer from them with citations."
+)
+
+_CAPABILITY_REPLY = (
+    "I'm **Sentinel**, a cyber-security intelligence assistant. I answer from a curated "
+    "knowledge base rather than from open web guesses.\n\n"
+    "- **Grounded answers** from indexed security reports, advisories, CVEs (CISA KEV), "
+    "MITRE ATT&CK techniques, detection rules and GitHub repos — every answer cites its sources.\n"
+    "- **Web fallback** when nothing indexed matches the question.\n"
+    "- **Conversation memory** — I keep the current chat in context, so follow-ups like "
+    "\"how is it detected?\" work.\n\n"
+    "Try: *\"What is CVE-2018-5002?\"*, *\"How does Kerberoasting work?\"*, or "
+    "*\"Which KEV CVEs affect Fortinet?\"*"
+)
+
+_IDENTITY_RX = re.compile(
+    r"^\s*(who\s+are\s+you|what\s+are\s+you|what\s+is\s+this|what('?s| is)\s+sentinel|"
+    r"what\s+can\s+you\s+do|what\s+do\s+you\s+do|what\s+are\s+you\s+capable\s+of|"
+    r"what\s+are\s+your\s+(capabilities|features)|your\s+capabilities|how\s+do\s+you\s+work|"
+    r"introduce\s+yourself|help|what\s+can\s+i\s+ask)\s*\??\s*$",
+    re.I,
+)
+
+
+def smalltalk_reply(text: str) -> str | None:
+    """Fixed reply for a greeting / identity / capability question, else None."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    if is_greeting(t) and len(t) <= 40:
+        return _GREETING_REPLY
+    if _IDENTITY_RX.match(t):
+        return _CAPABILITY_REPLY
+    return None
+
+
 # =========================================================
 # PROMPT
 # =========================================================
@@ -415,6 +462,10 @@ def _condense_question(history, question: str) -> str:
 
 
 def rag_answer(question: str, history=None) -> str:
+    small = smalltalk_reply(question)
+    if small:
+        return small
+
     search_q = _condense_question(history, question) if (history and _memory_on()) else question
     context = retrieve_context(search_q)
 
@@ -545,6 +596,12 @@ def rag_answer_stream(question: str, history=None):
     first — used to condense the follow-up for retrieval and to keep the answer
     coherent with earlier turns.
     """
+    small = smalltalk_reply(question)
+    if small:
+        yield {"type": "step", "id": "answer", "label": "Answering directly", "state": "done"}
+        yield from _typewriter(small)
+        return
+
     use_memory = bool(history) and _memory_on()
     search_q = _condense_question(history, question) if use_memory else question
     hist_block = _history_block(history) if use_memory else ""

@@ -38,8 +38,13 @@ def _llm():
     return _LLM
 
 
-def _on() -> bool:
+def _env_on() -> bool:
     return os.getenv("GUARDRAILS_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve(enabled) -> bool:
+    """`enabled` (from the admin toggle) wins; falls back to the env default."""
+    return _env_on() if enabled is None else bool(enabled)
 
 
 def _llm_check_on() -> bool:
@@ -101,11 +106,12 @@ def _llm_says_misuse(text: str) -> bool:
         return False
 
 
-def check_input(text: str) -> dict:
+def check_input(text: str, enabled=None) -> dict:
     """Return {allowed: bool, category: str, message: str}. `message` is the
-    canned reply to show the user when allowed is False."""
+    canned reply to show the user when allowed is False. `enabled` comes from the
+    admin toggle; None means use the env default."""
     t = (text or "").strip()
-    if not _on():
+    if not _resolve(enabled):
         return {"allowed": bool(t), "category": "" if t else "empty",
                 "message": "" if t else _EMPTY_MSG}
     if not t:
@@ -126,11 +132,11 @@ _SYS_LEAK = re.compile(
 )
 
 
-def check_output(text: str) -> dict:
+def check_output(text: str, enabled=None) -> dict:
     """Return {text: str, flags: list[str]}. Redacts a verbatim system-prompt leak."""
     out = text or ""
     flags = []
-    if not _on():
+    if not _resolve(enabled):
         return {"text": out, "flags": flags}
     if _SYS_LEAK.search(out):
         out = _SYS_LEAK.sub("[internal instructions withheld]", out)

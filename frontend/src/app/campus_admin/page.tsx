@@ -7,6 +7,7 @@ import { API_ENDPOINTS } from "@/lib/api";
 import type { KnowledgeSource } from "@/lib/ingestStream";
 import IngestPanel from "@/components/admin/IngestPanel";
 import SourceList from "@/components/admin/SourceList";
+import GuardrailToggle from "@/components/admin/GuardrailToggle";
 
 export default function AdminPage() {
     const router = useRouter();
@@ -96,6 +97,8 @@ export default function AdminPage() {
                     </div>
 
                     <div className="flex flex-col gap-5">
+                        <GuardrailToggle />
+
                         <div className="rounded-card border border-line bg-surface p-5 shadow-card">
                             <h3 className="mb-4 flex items-center gap-2 text-[13.5px] font-medium text-ink">
                                 <Cpu size={15} className="text-accent-ink" />

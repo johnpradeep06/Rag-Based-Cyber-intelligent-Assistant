@@ -31,6 +31,9 @@ export const API_ENDPOINTS = {
   sources: `${API_BASE_URL}/sources`,
   sourcesGraph: `${API_BASE_URL}/sources/graph`,
   deleteSource: (id: number | string) => `${API_BASE_URL}/sources/${id}`,
+
+  // Admin runtime settings
+  adminSettings: `${API_BASE_URL}/admin/settings`,
 } as const;
 
 export default API_ENDPOINTS;

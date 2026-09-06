@@ -70,6 +70,16 @@ text_splitter = RecursiveCharacterTextSplitter(
     chunk_overlap=200,
 )
 
+def _invalidate_bm25():
+    """Tell the opt-in retrieval module its lexical index is stale. No-op unless
+    retrieval.py is importable (RETRIEVAL_V2 workflow)."""
+    try:
+        import retrieval
+        retrieval.reset_bm25()
+    except Exception:
+        pass
+
+
 def _tag_and_store(docs, *, source_type: str, title: str, origin: str, ref: str,
                    split: bool = True) -> int:
     """Stamp normalized metadata on every doc, chunk (prose only), and index.
@@ -92,6 +102,7 @@ def _tag_and_store(docs, *, source_type: str, title: str, origin: str, ref: str,
         return 0
     chunks = text_splitter.split_documents(clean) if split else clean
     vectorstore.add_documents(documents=chunks)
+    _invalidate_bm25()
     return len(chunks)
 
 
@@ -382,7 +393,16 @@ _stream_client = OpenAI(
 
 def retrieve_context_docs(question: str):
     """Same retrieval as retrieve_context(), but keeps the Document objects
-    (and their metadata) instead of collapsing to a joined string."""
+    (and their metadata) instead of collapsing to a joined string.
+
+    With RETRIEVAL_V2 set, delegates to the opt-in hybrid/rerank pipeline in
+    retrieval.py; any failure there falls back to the baseline below."""
+    if os.getenv("RETRIEVAL_V2", "").strip().lower() in ("1", "true", "yes", "on"):
+        try:
+            import retrieval
+            return retrieval.retrieve(question)
+        except Exception as e:  # noqa: BLE001 - baseline is always a safe fallback
+            print(f"[retrieve_context_docs] v2 unavailable, using baseline: {e}")
     results = vectorstore.similarity_search_with_relevance_scores(question, k=4)
     docs = [doc for doc, score in results if score >= RELEVANCE_THRESHOLD]
     return docs or None
@@ -741,6 +761,7 @@ def delete_source(ref: str) -> int:
         col = vectorstore._collection
         before = col.count()
         col.delete(where={"ref": ref})
+        _invalidate_bm25()
         return max(0, before - col.count())
     except Exception:
         return 0

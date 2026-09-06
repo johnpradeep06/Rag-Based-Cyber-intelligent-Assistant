@@ -19,3 +19,5 @@ docx2txt
 openpyxl
 GitPython
 feedparser
+rank-bm25
+httpx

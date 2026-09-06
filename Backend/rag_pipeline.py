@@ -360,22 +360,79 @@ def _is_refusal(text: str) -> bool:
     return len(t) < 120 and any(trigger in t for trigger in FALLBACK_TRIGGERS)
 
 
-def rag_answer(question: str) -> str:
-    context = retrieve_context(question)
+# =========================================================
+# SHORT-TERM CONVERSATION MEMORY
+# =========================================================
+# The caller (app.py) passes `history` = recent [{role, content}] for the session,
+# oldest first, already windowed. Two uses:
+#   1. condense a follow-up into a standalone question for retrieval
+#   2. give the generator a short transcript so the answer stays coherent
+# Both degrade to "no memory" on any error.
+
+MEMORY_WINDOW = int(os.getenv("MEMORY_WINDOW", "6"))
+
+
+def _memory_on() -> bool:
+    return os.getenv("CONVERSATION_MEMORY_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _history_block(history) -> str:
+    if not history:
+        return ""
+    lines = []
+    for m in history:
+        who = "User" if m.get("role") == "user" else "Assistant"
+        c = " ".join((m.get("content") or "").split())[:500]
+        if c:
+            lines.append(f"{who}: {c}")
+    return "\n".join(lines)
+
+
+def _condense_question(history, question: str) -> str:
+    """Rewrite a follow-up into a standalone question using recent turns.
+    Returns `question` unchanged when there is no history or on any error."""
+    block = _history_block(history)
+    if not block:
+        return question
+    try:
+        r = _stream_client.chat.completions.create(
+            model="openai/gpt-oss-120b", max_tokens=160, temperature=0.0,
+            messages=[{"role": "user", "content":
+                       "Given the conversation and a follow-up question, rewrite the "
+                       "follow-up as a standalone question that makes sense on its own. "
+                       "Keep it faithful and do NOT answer it. If it is already "
+                       "standalone, return it unchanged.\n\n"
+                       f"Conversation:\n{block}\n\nFollow-up: {question}\n\n"
+                       "Standalone question:"}],
+            # gpt-oss-120b always reasons; `exclude` keeps that out of `content`.
+            extra_body={"reasoning": {"effort": "low", "exclude": True}},
+        )
+        return (r.choices[0].message.content or "").strip() or question
+    except Exception as e:  # noqa: BLE001
+        print(f"[memory] condense failed, using raw question: {e}")
+        return question
+
+
+def rag_answer(question: str, history=None) -> str:
+    search_q = _condense_question(history, question) if (history and _memory_on()) else question
+    context = retrieve_context(search_q)
 
     if context is None:
         # Nothing retrieved — try the (best-effort) web fallback for on-topic questions.
-        if is_university_relevant(question):
-            return exa_search_fallback(f"{question} (cyber security)")
+        if is_university_relevant(search_q):
+            return exa_search_fallback(f"{search_q} (cyber security)")
         return "The indexed sources don't cover this."
 
+    block = _history_block(history) if (history and _memory_on()) else ""
+    q_for_prompt = f"Conversation so far:\n{block}\n\n{question}" if block else question
     chain = (
         {"context": lambda _: context, "question": RunnablePassthrough()}
         | prompt
         | llm
         | StrOutputParser()
     )
-    return chain.invoke(question)
+    return chain.invoke(q_for_prompt)
 
 
 # =========================================================
@@ -476,17 +533,28 @@ def _stream_llm(prompt_text: str):
     return "".join(buf)
 
 
-def rag_answer_stream(question: str):
+def rag_answer_stream(question: str, history=None):
     """Generator of content event dicts (the endpoint adds the SSE envelope
     and a trailing {type:'done'}):
       {type:'step', id, label, state:'active'|'done'}
       {type:'reasoning', delta}
       {type:'sources', sources:[...]}
       {type:'delta', text}
+
+    `history` (optional) is recent [{role, content}] for the session, oldest
+    first — used to condense the follow-up for retrieval and to keep the answer
+    coherent with earlier turns.
     """
+    use_memory = bool(history) and _memory_on()
+    search_q = _condense_question(history, question) if use_memory else question
+    hist_block = _history_block(history) if use_memory else ""
+    if use_memory and search_q != question:
+        yield {"type": "step", "id": "condense",
+               "label": "Resolved follow-up from conversation", "state": "done"}
+
     yield {"type": "step", "id": "retrieve",
            "label": "Searching the knowledge base", "state": "active"}
-    docs = retrieve_context_docs(question)
+    docs = retrieve_context_docs(search_q)
 
     if docs:
         yield {"type": "step", "id": "retrieve",
@@ -498,7 +566,10 @@ def rag_answer_stream(question: str):
                "label": "Drafting answer from context", "state": "active"}
 
         context = "\n\n".join(d.page_content for d in docs)
-        full = yield from _stream_llm(prompt.format(context=context, question=question))
+        prompt_text = prompt.format(context=context, question=question)
+        if hist_block:
+            prompt_text = f"Conversation so far:\n{hist_block}\n\n{prompt_text}"
+        full = yield from _stream_llm(prompt_text)
 
         # We have retrieved passages, so the answer stands on them — no web pivot.
         if not full.strip():
@@ -517,10 +588,10 @@ def rag_answer_stream(question: str):
     yield {"type": "step", "id": "retrieve",
            "label": "No matching indexed documents", "state": "done"}
 
-    if is_university_relevant(question):
+    if is_university_relevant(search_q):
         yield {"type": "step", "id": "web", "label": "Searching the web", "state": "active"}
         body, web_sources = _split_exa_sources(
-            exa_search_fallback(f"{question} (cyber security)")
+            exa_search_fallback(f"{search_q} (cyber security)")
         )
         yield {"type": "step", "id": "web", "label": "Searched the web", "state": "done"}
         if web_sources:

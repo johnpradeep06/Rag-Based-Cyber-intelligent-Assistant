@@ -28,6 +28,10 @@ Env flags
 import os
 import re
 
+from dotenv import load_dotenv
+
+load_dotenv()  # tolerate being imported before rag_pipeline
+
 _KEY = os.getenv("OPENROUTER_API_KEY")
 _BASE = "https://openrouter.ai/api/v1"
 _DEFAULT_EMB = "openai/text-embedding-ada-002"

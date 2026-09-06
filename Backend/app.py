@@ -26,8 +26,9 @@ from auth import (
 from rag_pipeline import (
     rag_answer, rag_answer_stream, ingest_document, delete_source,
     ingest_file_stream, ingest_url_stream, ingest_api_stream,
-    ingest_github_stream, import_feed_stream,
+    ingest_github_stream, import_feed_stream, MEMORY_WINDOW,
 )
+import guardrails
 
 # Create Tables
 Base.metadata.create_all(bind=engine)
@@ -434,6 +435,19 @@ def get_session_messages(session_id: int, current_user: User = Depends(get_curre
         raise HTTPException(status_code=404, detail="Session not found")
     return session.messages
 
+def _load_history(db: Session, session_id: int, limit: int = MEMORY_WINDOW):
+    """Recent turns for a session, oldest-first, as [{role, content}].
+    Call BEFORE saving the current user message so it isn't included."""
+    rows = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.session_id == session_id)
+        .order_by(ChatMessage.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [{"role": r.role, "content": r.content} for r in reversed(rows)]
+
+
 @app.post("/sessions/{session_id}/ask")
 def ask_rag_session(
     session_id: int,
@@ -444,23 +458,30 @@ def ask_rag_session(
     session = db.query(ChatSession).filter(ChatSession.id == session_id, ChatSession.user_id == current_user.id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     # Update title if it's "New Chat" and this is the first message
     if session.title == "New Chat":
         session.title = query.question[:30] + ("..." if len(query.question) > 30 else "")
         db.commit()
+
+    guard = guardrails.check_input(query.question)
+    history = _load_history(db, session.id) if guard["allowed"] else []
 
     # Save user message
     user_msg = ChatMessage(session_id=session.id, role="user", content=query.question)
     db.add(user_msg)
     db.commit()
 
-    # Call RAG
-    try:
-        answer = rag_answer(query.question)
-    except Exception as e:
-        answer = f"Error generating response: {str(e)}"
-    
+    # Call RAG (skip entirely when the input guardrail blocked the request)
+    if not guard["allowed"]:
+        answer = guard["message"]
+    else:
+        try:
+            answer = rag_answer(query.question, history=history)
+        except Exception as e:
+            answer = f"Error generating response: {str(e)}"
+        answer = guardrails.check_output(answer)["text"]
+
     # Save assistant message
     asst_msg = ChatMessage(session_id=session.id, role="assistant", content=answer)
     db.add(asst_msg)
@@ -488,16 +509,42 @@ def ask_rag_session_stream(
         session.title = query.question[:30] + ("..." if len(query.question) > 30 else "")
         db.commit()
 
+    guard = guardrails.check_input(query.question)
+    history = _load_history(db, session.id) if guard["allowed"] else []
+
     db.add(ChatMessage(session_id=session.id, role="user", content=query.question))
     db.commit()
 
     sid = session.id
     question = query.question
 
+    def _persist_assistant(content, reasoning=None, sources=None):
+        if not (content or reasoning):
+            return
+        wdb = SessionLocal()
+        try:
+            wdb.add(ChatMessage(
+                session_id=sid, role="assistant", content=content,
+                reasoning=reasoning or None,
+                sources=json.dumps(sources) if sources else None,
+            ))
+            wdb.commit()
+        finally:
+            wdb.close()
+
     def event_gen():
+        # Input guardrail tripped: stream the canned reply, persist it, stop.
+        if not guard["allowed"]:
+            msg = guard["message"]
+            for i in range(0, len(msg), 24):
+                yield f"data: {json.dumps({'type': 'delta', 'text': msg[i:i + 24]})}\n\n"
+            _persist_assistant(msg)
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return
+
         answer_parts, reasoning_parts, sources = [], [], None
         try:
-            for evt in rag_answer_stream(question):
+            for evt in rag_answer_stream(question, history=history):
                 etype = evt.get("type")
                 if etype == "delta":
                     answer_parts.append(evt["text"])
@@ -511,21 +558,12 @@ def ask_rag_session_stream(
         finally:
             # Persist on a fresh session: the request-scoped db is torn down
             # once the endpoint returns, before this generator finishes draining.
-            content = "".join(answer_parts)
+            checked = guardrails.check_output("".join(answer_parts))
+            content = checked["text"]
+            if checked["flags"]:
+                print(f"[guardrails] output flags {checked['flags']} on session {sid}")
             reasoning = "".join(reasoning_parts)
-            if content or reasoning:  # skip empty turns from an aborted stream
-                wdb = SessionLocal()
-                try:
-                    wdb.add(ChatMessage(
-                        session_id=sid,
-                        role="assistant",
-                        content=content,
-                        reasoning=reasoning or None,
-                        sources=json.dumps(sources) if sources else None,
-                    ))
-                    wdb.commit()
-                finally:
-                    wdb.close()
+            _persist_assistant(content, reasoning, sources)  # skips empty aborted turns
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(

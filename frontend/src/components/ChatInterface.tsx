@@ -393,10 +393,9 @@ export default function ChatInterface() {
                                     key={session.id}
                                     onClick={() => loadSession(session.id)}
                                     className={`mb-0.5 flex w-full items-center gap-2.5 rounded-control px-2.5 py-2 text-left
-                                        text-[13.5px] transition-colors ${
-                                            currentSessionId === session.id
-                                                ? "bg-hover-2 font-medium text-ink"
-                                                : "text-ink-2 hover:bg-hover hover:text-ink"
+                                        text-[13.5px] transition-colors ${currentSessionId === session.id
+                                            ? "bg-hover-2 font-medium text-ink"
+                                            : "text-ink-2 hover:bg-hover hover:text-ink"
                                         }`}
                                 >
                                     <MessageSquare
@@ -438,93 +437,92 @@ export default function ChatInterface() {
                 </div>
 
                 {messages.length > 0 && (
-                  <div className="relative min-h-0 w-full flex-1">
-                    <div
-                        ref={scrollRef}
-                        onScroll={onMessagesScroll}
-                        style={{ overflowAnchor: "none" }}
-                        className="custom-scrollbar flex h-full w-full flex-col items-center overflow-y-auto"
-                    >
+                    <div className="relative min-h-0 w-full flex-1">
                         <div
-                            className="flex w-full max-w-3xl flex-col gap-8 px-4 pt-4 pb-6 md:px-0"
-                            data-selectable
+                            ref={scrollRef}
+                            onScroll={onMessagesScroll}
+                            style={{ overflowAnchor: "none" }}
+                            className="custom-scrollbar flex h-full w-full flex-col items-center overflow-y-auto"
                         >
-                            {messages.map((msg, idx) => (
-                                <div
-                                    key={idx}
-                                    className={`flex w-full ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-                                >
-                                    {msg.role === "user" ? (
-                                        (() => {
-                                            const { quote: q, body } = splitQuote(msg.content);
-                                            return (
-                                                <div className="max-w-[85%] overflow-hidden rounded-window rounded-br-md border border-line bg-surface shadow-card">
-                                                    {q && (
-                                                        <div className="flex gap-2 border-b border-line bg-inset px-3.5 py-2.5">
-                                                            <QuoteIcon size={12} className="mt-1 shrink-0 text-accent-ink" />
-                                                            <p className="line-clamp-3 text-[13px] leading-[1.5] text-ink-3 italic">
-                                                                {q}
-                                                            </p>
+                            <div
+                                className="flex w-full max-w-3xl flex-col gap-8 px-4 pt-4 pb-6 md:px-0"
+                                data-selectable
+                            >
+                                {messages.map((msg, idx) => (
+                                    <div
+                                        key={idx}
+                                        className={`flex w-full ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                                    >
+                                        {msg.role === "user" ? (
+                                            (() => {
+                                                const { quote: q, body } = splitQuote(msg.content);
+                                                return (
+                                                    <div className="max-w-[85%] overflow-hidden rounded-window rounded-br-md border border-line bg-surface shadow-card">
+                                                        {q && (
+                                                            <div className="flex gap-2 border-b border-line bg-inset px-3.5 py-2.5">
+                                                                <QuoteIcon size={12} className="mt-1 shrink-0 text-accent-ink" />
+                                                                <p className="line-clamp-3 text-[13px] leading-[1.5] text-ink-3 italic">
+                                                                    {q}
+                                                                </p>
+                                                            </div>
+                                                        )}
+                                                        <div className="px-4 py-2.5 text-[15.5px] leading-[1.65] whitespace-pre-wrap text-ink">
+                                                            {body}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })()
+                                        ) : (
+                                            <div className="flex w-full">
+                                                <div className="flex w-full min-w-0 flex-col gap-3">
+                                                    {(msg.steps?.length || msg.reasoning) ? (
+                                                        <ThinkingState
+                                                            steps={msg.steps ?? []}
+                                                            reasoning={msg.reasoning}
+                                                            working={!!msg.streaming && !msg.content}
+                                                        />
+                                                    ) : null}
+
+                                                    {msg.streaming && !msg.content && !msg.steps?.length && (
+                                                        <LoadingState variant="Drive" label="Fathoming..." />
+                                                    )}
+
+                                                    {msg.content && (
+                                                        <div className={msg.error ? "text-red" : undefined}>
+                                                            <StreamingText text={msg.content} streaming={msg.streaming} />
                                                         </div>
                                                     )}
-                                                    <div className="px-4 py-2.5 text-[15.5px] leading-[1.65] whitespace-pre-wrap text-ink">
-                                                        {body}
-                                                    </div>
+
+                                                    {msg.sources?.length && !msg.streaming ? (
+                                                        <Sources items={msg.sources} />
+                                                    ) : null}
                                                 </div>
-                                            );
-                                        })()
-                                    ) : (
-                                        <div className="flex w-full">
-                                            <div className="flex w-full min-w-0 flex-col gap-3">
-                                                {(msg.steps?.length || msg.reasoning) ? (
-                                                    <ThinkingState
-                                                        steps={msg.steps ?? []}
-                                                        reasoning={msg.reasoning}
-                                                        working={!!msg.streaming && !msg.content}
-                                                    />
-                                                ) : null}
-
-                                                {msg.streaming && !msg.content && !msg.steps?.length && (
-                                                    <LoadingState variant="Drive" label="Analyzing threat intelligence" />
-                                                )}
-
-                                                {msg.content && (
-                                                    <div className={msg.error ? "text-red" : undefined}>
-                                                        <StreamingText text={msg.content} streaming={msg.streaming} />
-                                                    </div>
-                                                )}
-
-                                                {msg.sources?.length && !msg.streaming ? (
-                                                    <Sources items={msg.sources} />
-                                                ) : null}
                                             </div>
-                                        </div>
-                                    )}
-                                </div>
-                            ))}
-                            <div ref={messagesEndRef} className="h-2" />
+                                        )}
+                                    </div>
+                                ))}
+                                <div ref={messagesEndRef} className="h-2" />
+                            </div>
                         </div>
-                    </div>
 
-                    {showJumpButton && (
-                        <button
-                            onClick={jumpToBottom}
-                            className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-surface px-3.5 py-2 text-[12.5px] font-medium text-ink-2 shadow-overlay transition-colors hover:bg-hover hover:text-ink"
-                            style={{ animation: "fade-up 180ms cubic-bezier(0.23,1,0.32,1) both" }}
-                            title="Jump to latest"
-                        >
-                            <ArrowUp size={13} className="rotate-180" />
-                            {isLoading ? "New replies" : "Jump to latest"}
-                        </button>
-                    )}
-                  </div>
+                        {showJumpButton && (
+                            <button
+                                onClick={jumpToBottom}
+                                className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-surface px-3.5 py-2 text-[12.5px] font-medium text-ink-2 shadow-overlay transition-colors hover:bg-hover hover:text-ink"
+                                style={{ animation: "fade-up 180ms cubic-bezier(0.23,1,0.32,1) both" }}
+                                title="Jump to latest"
+                            >
+                                <ArrowUp size={13} className="rotate-180" />
+                                {isLoading ? "New replies" : "Jump to latest"}
+                            </button>
+                        )}
+                    </div>
                 )}
 
                 {/* Composer */}
                 <div
-                    className={`z-10 flex w-full shrink-0 flex-col items-center px-4 transition-all duration-500 md:px-0 ${
-                        messages.length === 0 ? "mt-[-6vh] flex-1 justify-center" : "justify-end bg-canvas pt-3 pb-5"
-                    }`}
+                    className={`z-10 flex w-full shrink-0 flex-col items-center px-4 transition-all duration-500 md:px-0 ${messages.length === 0 ? "mt-[-6vh] flex-1 justify-center" : "justify-end bg-canvas pt-3 pb-5"
+                        }`}
                 >
                     <div className="relative flex w-full max-w-3xl flex-col items-center">
                         {messages.length === 0 && (
@@ -592,11 +590,10 @@ export default function ChatInterface() {
                                     <button
                                         onClick={() => handleSubmit()}
                                         disabled={!input.trim()}
-                                        className={`flex size-8 items-center justify-center rounded-full transition-all ${
-                                            input.trim()
+                                        className={`flex size-8 items-center justify-center rounded-full transition-all ${input.trim()
                                                 ? "bg-accent text-white hover:opacity-90"
                                                 : "cursor-not-allowed bg-inset text-ink-3"
-                                        }`}
+                                            }`}
                                         title="Send"
                                     >
                                         <ArrowUp size={16} />

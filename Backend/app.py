@@ -105,6 +105,8 @@ class SourceResponse(BaseModel):
 
 class UrlIngestRequest(BaseModel):
     url: str
+    crawl: bool = False
+    max_pages: int = 20
 
 class ApiIngestRequest(BaseModel):
     url: str
@@ -336,7 +338,7 @@ def ingest_files(
 
 @app.post("/ingest/url")
 def ingest_url(body: UrlIngestRequest, current_user: User = Depends(get_current_admin_user)):
-    return _ingest_sse(ingest_url_stream(body.url))
+    return _ingest_sse(ingest_url_stream(body.url, body.crawl, body.max_pages))
 
 
 @app.post("/ingest/api")

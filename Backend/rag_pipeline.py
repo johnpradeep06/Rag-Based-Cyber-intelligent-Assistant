@@ -1,10 +1,13 @@
+import io
 import os
 import re
 import csv
 import time
 import json
 import shutil
+import tarfile
 import tempfile
+from urllib.parse import urljoin, urlparse
 import bs4
 import requests
 from dotenv import load_dotenv
@@ -16,7 +19,7 @@ from langchain_core.documents import Document
 from langchain_core.prompts import PromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import (
-    WebBaseLoader, PyPDFLoader, TextLoader, Docx2txtLoader, GitLoader,
+    WebBaseLoader, PyPDFLoader, TextLoader, Docx2txtLoader,
 )
 from langchain_community.vectorstores import Chroma
 from langchain_core.output_parsers import StrOutputParser
@@ -247,21 +250,22 @@ def is_greeting(text: str) -> bool:
 # back. Caught here and answered with a fixed reply (also skips a round trip).
 
 _GREETING_REPLY = (
-    "Hi — I'm **Sentinel**, a cyber-security intelligence assistant. Ask me about "
-    "threats, vulnerabilities, detection rules, or anything in the indexed security "
-    "sources and I'll answer from them with citations."
+    "Hi — I'm **Sentinel**, a cyber-security intelligence assistant. Ask me about a "
+    "vulnerability, an attack technique, a threat actor, or anything your team has "
+    "indexed, and I'll answer from those sources with citations."
 )
 
 _CAPABILITY_REPLY = (
-    "I'm **Sentinel**, a cyber-security intelligence assistant. I answer from a curated "
-    "knowledge base rather than from open web guesses.\n\n"
-    "- **Grounded answers** from indexed security reports, advisories, CVEs (CISA KEV), "
-    "MITRE ATT&CK techniques, detection rules and GitHub repos — every answer cites its sources.\n"
-    "- **Web fallback** when nothing indexed matches the question.\n"
-    "- **Conversation memory** — I keep the current chat in context, so follow-ups like "
-    "\"how is it detected?\" work.\n\n"
-    "Try: *\"What is CVE-2018-5002?\"*, *\"How does Kerberoasting work?\"*, or "
-    "*\"Which KEV CVEs affect Fortinet?\"*"
+    "I'm **Sentinel**, a cyber-security intelligence assistant. Unlike a general "
+    "chatbot, I answer from a curated knowledge base an analyst controls.\n\n"
+    "- **Grounded answers** — I retrieve from the indexed security documents "
+    "(reports, advisories, threat feeds, detection rules, repos) and answer only "
+    "from what's there, with citations.\n"
+    "- **Web fallback** — if nothing indexed matches, I can pull from the web instead.\n"
+    "- **Conversation memory** — I keep the current chat in context, so a follow-up "
+    "like \"how is it detected?\" resolves against what we were just discussing.\n\n"
+    "Ask me about a vulnerability, an attack technique, a threat actor, or anything "
+    "your team has added to the knowledge base."
 )
 
 _IDENTITY_RX = re.compile(
@@ -705,7 +709,122 @@ def ingest_file_stream(path: str):
     yield {"type": "done", "chunk_count": n}
 
 
-def ingest_url_stream(url: str):
+_CVE_ID_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.I)
+_UA = {"User-Agent": "sentinel-rag/1.0"}
+
+
+def _fetch_cve_record(cve_id: str) -> Document:
+    """Pull a structured CVE record from MITRE's CVE Services API and render it
+    as readable text. Works for any CVE id — no auth, clean JSON (unlike the
+    JS-rendered cve.org / nvd.nist.gov pages, which scrape to nothing)."""
+    r = requests.get(f"https://cveawg.mitre.org/api/cve/{cve_id}", timeout=30, headers=_UA)
+    r.raise_for_status()
+    d = r.json()
+    meta = d.get("cveMetadata", {})
+    cna = d.get("containers", {}).get("cna", {})
+
+    lines = [cve_id]
+    if cna.get("title"):
+        lines.append(f"Title: {cna['title']}")
+    if meta.get("datePublished"):
+        lines.append(f"Published: {meta['datePublished']}")
+
+    desc = " ".join(
+        x.get("value", "") for x in cna.get("descriptions", [])
+        if str(x.get("lang", "en")).lower().startswith("en")
+    ).strip()
+    if desc:
+        lines.append(f"\nDescription:\n{desc}")
+
+    affected = []
+    for a in cna.get("affected", []):
+        vendor, product = a.get("vendor", "?"), a.get("product", "?")
+        vers = ", ".join(v.get("version", "") for v in a.get("versions", []) if v.get("version"))
+        affected.append(f"- {vendor} {product}" + (f" ({vers})" if vers else ""))
+    if affected:
+        lines.append("\nAffected:\n" + "\n".join(affected))
+
+    for m in cna.get("metrics", []):
+        for key in ("cvssV4_0", "cvssV3_1", "cvssV3_0", "cvssV2_0"):
+            c = m.get(key)
+            if c:
+                lines.append(f"\nCVSS: {c.get('baseScore')} {c.get('baseSeverity', '')} "
+                             f"({c.get('vectorString', '')})".rstrip())
+                break
+
+    cwes = [x["description"] for pt in cna.get("problemTypes", [])
+            for x in pt.get("descriptions", []) if x.get("description")]
+    if cwes:
+        lines.append("\nWeakness: " + "; ".join(cwes))
+
+    refs = [x["url"] for x in cna.get("references", []) if x.get("url")]
+    if refs:
+        lines.append("\nReferences:\n" + "\n".join(f"- {u}" for u in refs[:20]))
+
+    return Document(page_content="\n".join(lines), metadata={"title": cve_id, "cve_id": cve_id})
+
+
+def _crawl_site(start: str, max_pages: int):
+    """Breadth-first crawl of same-host pages from `start`. Yields Documents."""
+    max_pages = max(1, min(int(max_pages or 20), 40))
+    host = urlparse(start).netloc
+    seen, queue, out = set(), [start], []
+    while queue and len(out) < max_pages:
+        u = queue.pop(0)
+        if u in seen:
+            continue
+        seen.add(u)
+        try:
+            r = requests.get(u, timeout=20, headers=_UA)
+            if r.status_code != 200 or "text/html" not in r.headers.get("content-type", ""):
+                continue
+        except Exception:
+            continue
+        soup = bs4.BeautifulSoup(r.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "svg"]):
+            tag.decompose()
+        text = " ".join(soup.get_text(" ").split())
+        if len(text) > 200:
+            title = (soup.title.string.strip() if soup.title and soup.title.string else u)
+            out.append((Document(page_content=text, metadata={"source": u, "title": title}), len(out) + 1))
+            yield out[-1][0], len(out), max_pages
+        for a in soup.find_all("a", href=True):
+            nxt = urljoin(u, a["href"]).split("#")[0]
+            if urlparse(nxt).netloc == host and nxt not in seen and nxt not in queue:
+                queue.append(nxt)
+
+
+def ingest_url_stream(url: str, crawl: bool = False, max_pages: int = 20):
+    # --- CVE link -> structured record from the CVE API -------------------
+    m = _CVE_ID_RE.search(url)
+    if m and re.search(r"cve\.org|nvd\.nist\.gov|mitre\.org|first\.org", url, re.I):
+        cid = m.group(0).upper()
+        yield {"type": "step", "label": f"Fetching {cid} from the CVE API"}
+        doc = _fetch_cve_record(cid)
+        yield {"type": "meta", "source_type": "cve", "title": cid, "origin": "url", "ref": cid}
+        yield {"type": "step", "label": "Indexing record"}
+        n = _tag_and_store([doc], source_type="cve", title=cid, origin="url",
+                           ref=cid, split=False)
+        yield {"type": "done", "chunk_count": n}
+        return
+
+    # --- crawl the site -------------------------------------------------
+    if crawl:
+        yield {"type": "meta", "source_type": "url", "title": url, "origin": "url", "ref": url}
+        yield {"type": "step", "label": f"Crawling {urlparse(url).netloc}"}
+        docs = []
+        for doc, done, total in _crawl_site(url, max_pages):
+            docs.append(doc)
+            yield {"type": "progress", "done": done, "total": total, "label": "Crawling pages"}
+        if not docs:
+            yield {"type": "error", "message": "crawl found no readable pages"}
+            return
+        yield {"type": "step", "label": f"Indexing {len(docs)} page(s)"}
+        n = _tag_and_store(docs, source_type="url", title=url, origin="url", ref=url)
+        yield {"type": "done", "chunk_count": n}
+        return
+
+    # --- single page (default) ---------------------------------------------
     yield {"type": "step", "label": f"Fetching {url}"}
     docs = WebBaseLoader(url).load()
     title = (docs[0].metadata.get("title") if docs else "") or url
@@ -748,13 +867,42 @@ def ingest_api_stream(url: str, headers=None, json_path: str = "", title_key=Non
     yield {"type": "done", "chunk_count": n}
 
 
+def _github_owner_repo(url: str):
+    m = re.search(r"github\.com[/:]+([^/\s]+)/([^/#?\s]+)", url.strip())
+    if not m:
+        raise ValueError(f"not a GitHub repo URL: {url!r}")
+    owner, repo = m.group(1), m.group(2)
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    return owner, repo
+
+
+def _download_repo_tarball(owner: str, repo: str, branch: str) -> bytes:
+    """Fetch a repo snapshot as a .tar.gz over HTTP — no `git` binary, and
+    codeload isn't API-rate-limited. Tries the given branch, then main/master."""
+    candidates = []
+    for b in dict.fromkeys([branch, "main", "master"]):
+        candidates.append(f"https://codeload.github.com/{owner}/{repo}/tar.gz/refs/heads/{b}")
+        candidates.append(f"https://codeload.github.com/{owner}/{repo}/tar.gz/{b}")
+    candidates.append(f"https://api.github.com/repos/{owner}/{repo}/tarball/{branch}")
+    last = "no response"
+    for u in candidates:
+        try:
+            r = requests.get(u, timeout=60, headers=_UA)
+            if r.status_code == 200 and r.content:
+                return r.content
+            last = f"HTTP {r.status_code} for {u}"
+        except Exception as e:  # noqa: BLE001
+            last = f"{type(e).__name__}: {e}"
+    raise RuntimeError(f"could not download repo archive ({last})")
+
+
 def ingest_github_stream(repo_url: str, branch: str = "main"):
-    repo_url = repo_url.rstrip("/")
-    if repo_url.endswith(".git"):
-        repo_url = repo_url[:-4]
-    label = "/".join(repo_url.split("/")[-2:])
+    owner, repo = _github_owner_repo(repo_url)
+    label = f"{owner}/{repo}"
+    canonical = f"https://github.com/{owner}/{repo}"
     yield {"type": "meta", "source_type": "github", "title": label,
-           "origin": "github", "ref": repo_url}
+           "origin": "github", "ref": canonical}
 
     def _ff(p: str) -> bool:
         q = "/" + p.replace("\\", "/").lstrip("/")
@@ -762,28 +910,41 @@ def ingest_github_stream(repo_url: str, branch: str = "main"):
             return False
         return os.path.splitext(q)[1].lower() in _CODE_EXT
 
-    tmp = tempfile.mkdtemp(prefix="sentinel_repo_")
-    try:
-        yield {"type": "step", "label": f"Cloning {label}"}
-        try:
-            docs = GitLoader(repo_path=tmp, clone_url=repo_url, branch=branch,
-                             file_filter=_ff).load()
-        except Exception:
-            shutil.rmtree(tmp, ignore_errors=True)
-            tmp = tempfile.mkdtemp(prefix="sentinel_repo_")
-            docs = GitLoader(repo_path=tmp, clone_url=repo_url, branch="master",
-                             file_filter=_ff).load()
-        docs = [d for d in docs if len(d.page_content or "") <= 200_000]
-        total, done, n = len(docs), 0, 0
-        yield {"type": "step", "label": f"Indexing {total} files"}
-        for batch in _batched(docs, 20):
-            n += _tag_and_store(batch, source_type="github", title=label,
-                                origin="github", ref=repo_url)
-            done += len(batch)
-            yield {"type": "progress", "done": done, "total": total, "label": "Indexing files"}
-        yield {"type": "done", "chunk_count": n}
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    yield {"type": "step", "label": f"Downloading {label}"}
+    raw = _download_repo_tarball(owner, repo, branch or "main")
+
+    yield {"type": "step", "label": "Reading repository files"}
+    cap = 1500  # keep a giant monorepo from blowing up the embed budget
+    docs, capped = [], False
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            if len(docs) >= cap:
+                capped = True
+                break
+            if not member.isfile() or member.size > 200_000:
+                continue
+            rel = member.name.split("/", 1)[1] if "/" in member.name else member.name
+            if not _ff(rel):
+                continue
+            try:
+                text = tar.extractfile(member).read().decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                continue
+            if text.strip():
+                docs.append(Document(page_content=text, metadata={"source": rel}))
+
+    total, done, n = len(docs), 0, 0
+    if total == 0:
+        yield {"type": "error", "message": "no indexable text/config/rule files found in the repo"}
+        return
+    yield {"type": "step",
+           "label": f"Indexing {total} files" + (f" (capped at {cap})" if capped else "")}
+    for batch in _batched(docs, 20):
+        n += _tag_and_store(batch, source_type="github", title=label,
+                            origin="github", ref=canonical)
+        done += len(batch)
+        yield {"type": "progress", "done": done, "total": total, "label": "Indexing files"}
+    yield {"type": "done", "chunk_count": n}
 
 
 def import_feed_stream(feed: str, include_subtechniques: bool = False, limit: int = 25):

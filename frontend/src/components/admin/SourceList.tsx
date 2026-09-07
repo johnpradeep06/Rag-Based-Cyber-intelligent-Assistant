@@ -18,6 +18,7 @@ const META: Record<string, { label: string; tone: string; icon: typeof FileText 
     github: { label: "REPO", tone: "text-ink-2 bg-inset", icon: Github },
     attack: { label: "ATT&CK", tone: "text-violet-400 bg-violet-400/12", icon: Crosshair },
     kev: { label: "KEV", tone: "text-amber-400 bg-amber-400/12", icon: ShieldAlert },
+    cve: { label: "CVE", tone: "text-amber-400 bg-amber-400/12", icon: ShieldAlert },
 };
 
 export default function SourceList({
